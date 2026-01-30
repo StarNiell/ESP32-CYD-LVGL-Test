@@ -1,303 +1,188 @@
-#pragma GCC optimize ("Ofast")
+#include <Arduino.h>
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 #include "LGFX_ESP32_2432S028.h"
+#include <lvgl.h>
 
-LGFX gfx; 
-LGFX_Sprite sMeterSprite(&gfx);
-LGFX_Sprite sNeedleSprite(&gfx);
+LGFX gfx;
 
-#define LGFX_VERTICAL_MODE    0
-#define LGFX_HORIZONTAL_MODE  1
+// --- Variabili Globali ---
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t buf[320 * 20];
 
-// Dimensioni dello schermo
-int w = 320;
-int h = 240;
+// Oggetti UI
+lv_obj_t * screen_main;
+lv_obj_t * screen_terminal;
+lv_obj_t * screen_sensors;
 
-// Coordinate del cardine dell'ago
-int cx = 160;
-int cy = 240;
+lv_obj_t * ui_textarea;      // Schermata 1
+lv_obj_t * label_temp_val;   // Schermata 2
+lv_obj_t * label_hum_val;    // Schermata 2
+lv_obj_t * label_counter;    // Schermata 1
+int counter = 0;
 
-//Posizione in gradi di inizio della scala lineare
-int a0 = 225;
-//Posizione in gradi di fine della scala lineare (fino S9)
-int aS9 = 280;
-//Posizione in gradi di fine della scala (+60db)
-int a1 = 315;
+// --- Callback Navigazione ---
+static void start_terminal_cb(lv_event_t * e) { lv_scr_load(screen_terminal); }
+static void start_sensors_cb(lv_event_t * e) { lv_scr_load(screen_sensors); }
 
-// imposta i pixel di spostamento dell'ago per i passi larghi
-int iNeedlePixelLargeMove = 3;
-
-// Set the your own values (linear interpolation) between the analog data and the SMeter signal
-float ranlg[10] = {27.0,   215.0, 640.0, 1350.0, 2130.0, 2705.0, 3125.0, 3460.0, 3760.0, 4000.0};
-float rsign[10] = {0.0,     1.0,   2.0,    3.0,    5.0,    7.0,    9.0,   10.0,   12.0,   15.0};
-float alpha[10];
-
-// Disegna lo sfondo del SMeter (Scala, ecc...)
-void drawSMeter(LGFX_Sprite & sprt)
-{
-// Tutte le funzioni di disegno sono disponibili come nel display LCD.
-// I colori possono essere specificati allo stesso modo dell'LCD, ma vengono automaticamente convertiti in scala di grigi.
-// (Il rapporto durante la conversione in scala di grigi è R1:G2:B1. Il verde è espresso leggermente più luminoso.)
-
-
-  sprt.setColorDepth(8);
-  sprt.createSprite(320,240);
-  sprt.fillSprite(TFT_WHITE);
-
-  sprt.setPivot(160, 120);
-
-  sprt.fillArc(cx, cy, 206, 200 - 1, 280, a1, TFT_RED); // Arco (parziale) di misurazione rosso (in alto)
-  sprt.fillArc(cx, cy, 200, 200 - 1, a0, a1, TFT_BLACK); // Arco di misurazione esterno (in alto)
-  sprt.fillArc(cx, cy, 197, 197 - 1, a0, a1, TFT_BLACK); // Arco di misurazione interno (in alto)
-  
-  int deltaS9 = (aS9 - a0) / 9; // Da S0 a S9 i livelli sono lineari, dopo S9 diventano logaritmici
-  int deltaS = (a1 - a0) / 14;  // Da S0 a +60 
-  int scale = 0;                // La scala di S (Santiago) da 0 a 9
-  int xt = 0;                   // coordinate x e y dei punti di ancoraggio per il teso
-  int yt = 0;                   //  -translati da "cartesiani" in mappa del display
-  float radAngle = 0.00;        // le funzioni sin() e cos() accettano parametro in radianti
-
-  for (int ai = a0; ai <= a1; ai += deltaS) // Ciclo gli angoli da S0 a S9
-  {
-      radAngle = (float)ai * (M_PI) /180.0;                 // Trasformo gradi degli angoli in radianti
-
-      xt = (223.0 * cos(radAngle)) + cx;               // Traslo x da "Cartesiano" a mappa LCD
-      yt = abs((-1 * (223.0 * sin(radAngle))) - cy);   // Traslo y da "Cartesiano" a mappa LCD
-
-    if ((scale % 2) || (scale == 0)) // Individuo 0 e i valori dispari
-    {
-      sprt.fillArc(cx, cy, 208, 200, ai, ai + 1, TFT_BLACK);  // Segni superiori lunghi neri  
-      sprt.fillArc(cx, cy, 197, 192, ai, ai + 1, TFT_BLACK);  // Segni inferiori corti
-
-      if (scale < 10)
-      {
-        sprt.setFont(&fonts::FreeSansBold9pt7b);
-        sprt.setTextColor(TFT_BLACK);
-        sprt.drawNumber(scale, xt, yt);
-      }
-    }
-    else
-    {
-      sprt.fillArc(cx, cy, 205, 200, ai, ai + 1, TFT_BLACK);  // Segni superiori corti neri  
-    }
-
-    if (scale > 9)
-    {
-      //sprt.fillArc(cx, cy, 205, 200, ai, ai + 1, TFT_BLACK);     // S0
-      sprt.setTextColor(TFT_RED);
-
-      Serial.print("scale: ");
-      Serial.println(scale);
-
-      switch (scale)
-      {
-        case (11):
-          sprt.drawString("+10", xt - 20, yt - 5, &fonts::FreeMonoBold9pt7b);
-          break;
-        case (13):
-          sprt.drawString("+30", xt - 25, yt - 10, &fonts::FreeMonoBold9pt7b);
-          break;
-        case (15):
-          sprt.drawString("+60", xt - 30, yt - 20, &fonts::FreeMonoBold9pt7b);
-          break;
-      }
-    }
-
-    scale++;
-
-  }
-
-  sprt.setTextColor(TFT_BLUE);
-  sprt.drawString("IU8NQI", 120 , 100,&fonts::FreeMonoBold12pt7b);
-
-  sprt.setTextColor(TFT_BLACK);
-  sprt.drawString("SIGNAL", 96, 140,&fonts::FreeSansBold18pt7b);
-
-  sprt.fillArc(cx, cy, 0, 40, 180, 360, TFT_DARKGRAY); // sede dell'ago
-      
+// --- Callback Contatore ---
+static void btn_inc_cb(lv_event_t * e) {
+    counter++;
+    lv_label_set_text_fmt(label_counter, "Conteggio: %d", counter);
 }
 
-void drawNeedle(LGFX_Sprite & sprt, int lenght, int radius)
-{
-  sprt.setColorDepth(8);
-  sprt.createSprite(5, lenght);  // create the needle Sprite 11 pixels wide by 30 high
+// --- Funzioni di Creazione Schermate ---
 
-  sprt.fillSprite(TFT_WHITE); // Fill with bianco
-
-  // Define needle pivot point
-  //uint16_t piv_x = needle.width() / 2;   // pivot x in Sprite (middle)
-  uint16_t piv_x = sprt.width() / 2;   // pivot x in Sprite (middle)
-  uint16_t piv_y = radius;        // pivot y in Sprite
-  sprt.setPivot(piv_x, piv_y);         // Set pivot point in this Sprite
-
-  // Draw the red needle with a yellow tip
-  // Keep needle tip 1 pixel inside dial circle to avoid leaving stray pixels
-  // Disegna l'ago (senza punta)
-  sprt.fillRect(piv_x - 1, 2, 3, lenght - 10, TFT_RED);
-  // Disegna la punta dell'ago
-  sprt.fillRect(piv_x - 1, 2, 3, 10, TFT_YELLOW);
-}
-
-void plotNeedle(LGFX_Sprite & background, int angle, byte ms_delay)
-{
-  static int16_t old_angle = 0;
-  int8_t needlePixelMove = 1; 
-  //angle = angle + 80;
-  angle -= 45; // Starts at -120 degrees
-
-  // Muove l'ago fino al raggiungimento della posizione
-  while (angle != old_angle) {
-
-    if (abs(old_angle - angle) < 10)
-      needlePixelMove = 1;                      // movimento lento
-    else
-      needlePixelMove = iNeedlePixelLargeMove;  // movimento veloce
-
-    if (old_angle > angle) 
-      needlePixelMove = (-needlePixelMove);
+void create_screen_main() {
+    screen_main = lv_obj_create(NULL);
     
-    // Imposta la posizione corrente dell'ago
-    old_angle += needlePixelMove;
+    lv_obj_t * btn1 = lv_btn_create(screen_main);
+    lv_obj_set_size(btn1, 200, 50);
+    lv_obj_align(btn1, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_add_event_cb(btn1, start_terminal_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * l1 = lv_label_create(btn1);
+    lv_label_set_text(l1, "Apri Terminale");
+    lv_obj_center(l1);
 
-    // Ridisegna lo sfondo
-    background.pushSprite(0,0);
-    // Disegna l'ago nella nuova posizione
-    sNeedleSprite.pushRotated(old_angle, TFT_WHITE);
-    // fa una brevissima pausa prima di muovere nuovamente l'ago
-    delay(ms_delay);
-  }
+    lv_obj_t * btn2 = lv_btn_create(screen_main);
+    lv_obj_set_size(btn2, 200, 50);
+    lv_obj_align(btn2, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_add_event_cb(btn2, start_sensors_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t * l2 = lv_label_create(btn2);
+    lv_label_set_text(l2, "Apri Sensori");
+    lv_obj_center(l2);
 }
 
-float getSignByAnalog(float anlg)
-{
-  float ret = 0.0;
-  //float alphaTop = 0.00;
-  float alphaPrev = 0.00;
-  float deltaVbase = 0.00;
-  float deltaAdiff = 0.00;
-  float deltaVXdiff = 0.00;
-  float deltaAXdiff = 0.00;
-  float alphaX = 0.00;
+void create_screen_terminal() {
+    screen_terminal = lv_obj_create(NULL);
+    
+    // Bottone + Label (Riga in alto)
+    lv_obj_t * btn = lv_btn_create(screen_terminal);
+    lv_obj_set_size(btn, 100, 40);
+    lv_obj_align(btn, LV_ALIGN_TOP_LEFT, 10, 10);
+    lv_obj_add_event_cb(btn, btn_inc_cb, LV_EVENT_CLICKED, NULL);
+    lv_label_set_text(lv_label_create(btn), "+1");
 
-  //Serial.println(ranlg[9]);
+    label_counter = lv_label_create(screen_terminal);
+    lv_label_set_text(label_counter, "Conteggio: 0");
+    lv_obj_align(label_counter, LV_ALIGN_TOP_RIGHT, -20, 20);
 
-  if (anlg <= ranlg[9])
-    for (int i = 0; i < 10; i++) 
-    {
-      if (anlg <= ranlg[i])
-      {
-        //Serial.print(i);
-        //Serial.print(" = ");
-        //Serial.println(anlg);
-        alphaPrev = alpha[i-1];
-        //alphaTop = alpha[i];
-        deltaVbase = ranlg[i] - ranlg[i-1];
-        deltaAdiff = alpha[i] - alpha[i-1];
-        deltaVXdiff = anlg - ranlg[i-1];
-        deltaAXdiff = deltaVXdiff * deltaAdiff / deltaVbase;
-        alphaX = alphaPrev + deltaAXdiff;
-        ret = anlg * alphaX;
-        int a = ret * 100;
-        ret = (float)a / 100;
-        break;
-      }
-    }
-  else{
-    ret = rsign[9];
-  }
-
-  if (ret > rsign[9])
-  {
-    ret = rsign[9];
-  }
-  return ret;
+    // TextArea
+    ui_textarea = lv_textarea_create(screen_terminal);
+    lv_obj_set_size(ui_textarea, 300, 160);
+    lv_obj_align(ui_textarea, LV_ALIGN_BOTTOM_MID, 0, -10);
 }
 
-void SetupAlpha(){
-  alpha[0] = 0.0000;
-  for (int i = 1; i < 10; i++) 
-  {
-    alpha[i] = rsign[i] / ranlg[i];
-  }
+void create_screen_sensors() {
+    screen_sensors = lv_obj_create(NULL);
+    // Impostiamo uno sfondo leggermente diverso per la pagina se vuoi
+    lv_obj_set_style_bg_color(screen_sensors, lv_palette_lighten(LV_PALETTE_GREY, 4), 0);
+
+    // --- RIGA TEMPERATURA ---
+    lv_obj_t * l_t = lv_label_create(screen_sensors);
+    lv_label_set_text(l_t, "Temperatura");
+    lv_obj_align(l_t, LV_ALIGN_TOP_LEFT, 20, 50);
+    lv_obj_set_style_text_font(l_t, &lv_font_montserrat_14, 0);
+
+    // Contenitore per il valore Temperatura (il "box" grigio)
+    lv_obj_t * cont_temp = lv_obj_create(screen_sensors);
+    lv_obj_set_size(cont_temp, 120, 45);
+    lv_obj_align(cont_temp, LV_ALIGN_TOP_RIGHT, -20, 35);
+    
+    // Stile del Box
+    lv_obj_set_style_bg_color(cont_temp, lv_palette_lighten(LV_PALETTE_GREY, 3), 0);
+    lv_obj_set_style_border_width(cont_temp, 2, 0);
+    lv_obj_set_style_border_color(cont_temp, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_radius(cont_temp, 10, 0); // Angoli arrotondati
+    lv_obj_clear_flag(cont_temp, LV_OBJ_FLAG_SCROLLABLE); // Evita scrollbar interne
+
+    label_temp_val = lv_label_create(cont_temp);
+    lv_label_set_text(label_temp_val, "--.- C");
+    lv_obj_center(label_temp_val); // Centra il testo nel box
+    lv_obj_set_style_text_font(label_temp_val, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(label_temp_val, lv_palette_main(LV_PALETTE_RED), 0);
+
+    // --- RIGA UMIDITÀ ---
+    lv_obj_t * l_h = lv_label_create(screen_sensors);
+    lv_label_set_text(l_h, "Umidita'");
+    lv_obj_align(l_h, LV_ALIGN_TOP_LEFT, 20, 120);
+    lv_obj_set_style_text_font(l_h, &lv_font_montserrat_14, 0);
+
+    // Contenitore per il valore Umidità
+    lv_obj_t * cont_hum = lv_obj_create(screen_sensors);
+    lv_obj_set_size(cont_hum, 120, 45);
+    lv_obj_align(cont_hum, LV_ALIGN_TOP_RIGHT, -20, 105);
+    
+    // Stile del Box (uguale a sopra)
+    lv_obj_set_style_bg_color(cont_hum, lv_palette_lighten(LV_PALETTE_GREY, 3), 0);
+    lv_obj_set_style_border_width(cont_hum, 2, 0);
+    lv_obj_set_style_border_color(cont_hum, lv_palette_main(LV_PALETTE_GREY), 0);
+    lv_obj_set_style_radius(cont_hum, 10, 0);
+    lv_obj_clear_flag(cont_hum, LV_OBJ_FLAG_SCROLLABLE);
+
+    label_hum_val = lv_label_create(cont_hum);
+    lv_label_set_text(label_hum_val, "-- %");
+    lv_obj_center(label_hum_val);
+    lv_obj_set_style_text_font(label_hum_val, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(label_hum_val, lv_palette_main(LV_PALETTE_BLUE), 0);
+}
+
+void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+    uint32_t w = (area->x2 - area->x1 + 1);
+    uint32_t h = (area->y2 - area->y1 + 1);
+
+    gfx.startWrite(); // Blocca il bus SPI per il display
+    gfx.setAddrWindow(area->x1, area->y1, w, h);
+    // Torniamo alla formula magica del primo test
+    gfx.pushPixels((uint16_t *)&color_p->full, w * h, true);
+    gfx.endWrite(); // Rilascia il bus SPI
+
+    lv_disp_flush_ready(disp);
+}
+void my_touch_read(lv_indev_drv_t *d, lv_indev_data_t *data) {
+    uint16_t x, y;
+    if(gfx.getTouch(&x, &y)) { data->state=LV_INDEV_STATE_PR; data->point.x=x; data->point.y=y; }
+    else data->state=LV_INDEV_STATE_REL;
 }
 
 void setup() {
-  //pinMode(35, INPUT);
-  Serial.begin(9600);
+    Serial.begin(115200);
+    Serial.setTimeout(10);
+    gfx.init(); gfx.setRotation(1); gfx.setBrightness(128);
+    lv_init();
+    lv_disp_draw_buf_init(&draw_buf, buf, NULL, 320 * 20);
+    static lv_disp_drv_t d_drv; lv_disp_drv_init(&d_drv);
+    d_drv.hor_res=320; d_drv.ver_res=240; d_drv.flush_cb=my_disp_flush; d_drv.draw_buf=&draw_buf;
+    lv_disp_drv_register(&d_drv);
+    static lv_indev_drv_t i_drv; lv_indev_drv_init(&i_drv);
+    i_drv.type=LV_INDEV_TYPE_POINTER; i_drv.read_cb=my_touch_read;
+    lv_indev_drv_register(&i_drv);
 
-  // Inizializza il display
-  gfx.init();
-  // Ruota il display in orizzondale
-  gfx.setRotation(LGFX_HORIZONTAL_MODE);
+    create_screen_main();
+    create_screen_terminal();
+    create_screen_sensors();
 
-  // Disegna lo sfondo del SMeter
-  drawSMeter(sMeterSprite);
-  //sMeterSprite.pushSprite(0,0); // rimuovere
-  
-  // Disegna l'ago
-  drawNeedle(sNeedleSprite, 188, 208);
-
-  // Imposta il centro di rotazione dell'ago
-  gfx.setPivot(cx, cy);  
-
-  // Visualizza lo sprite dello sfondo del SMeter
-  //sMeterSprite.pushSprite(0,0);
-  // Visualizzo lo sprite dell'ago in posizione 0
-  plotNeedle(sMeterSprite, 0, 1);
-  delay(500);
-  // Sposto l'ago in posizione fondo scala
-  plotNeedle(sMeterSprite, 90, 1);
-  delay(500);
-  // Riporto l'ago in posizione 0
-  plotNeedle(sMeterSprite, 0, 1);
-  delay(250);
-
-  SetupAlpha();
-  
-  
-}
-
-uint16_t readSignal()
-{
-  int r = 0;
-  for (int i = 0; i<500; i++)
-  {
-      r += analogRead(35);
-  }
-  return (r/500);
+    lv_scr_load(screen_main); // Carica la home all'avvio
 }
 
 void loop() {
-  
-  
-  // test
-  /*
-  int s = readSignal();
-  Serial.println(s);
-  uint16_t angle = (uint16_t)(90.0 * s / 3000);
-  plotNeedle(sMeterSprite, angle, 1);
-  delay(50);
-  */
-  
-  
-  
-  
-  
-  int s = readSignal();
-  Serial.print("anlg: ");
-  Serial.print(s);
-  
-  float sign = getSignByAnalog((float)s);
-
-  Serial.print(" - sign: ");
-  Serial.println(sign);
-
-  uint16_t angle = (uint16_t)(90.0 * sign / 15.0);
-  plotNeedle(sMeterSprite, angle, 1);
-  
-
-
-
-
+    lv_timer_handler();
+    if (Serial.available()) {
+        String msg = Serial.readStringUntil('\n');
+        msg.trim();
+        if (msg.length() > 0) {
+            // Parsing logica "t=" o "h="
+            if (msg.startsWith("t=")) {
+                lv_label_set_text(label_temp_val, (msg.substring(2) + " C").c_str());
+            } else if (msg.startsWith("h=")) {
+                lv_label_set_text(label_hum_val, (msg.substring(2) + " %").c_str());
+            } else {
+                // Se siamo nella schermata terminale, scriviamo lì
+                if(lv_scr_act() == screen_terminal) {
+                    lv_textarea_add_text(ui_textarea, (msg + "\n").c_str());
+                }
+            }
+        }
+    }
+    delay(5);
 }
